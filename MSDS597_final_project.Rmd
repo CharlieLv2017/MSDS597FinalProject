@@ -1,0 +1,363 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+```{r}
+knitr::opts_chunk$set(cache=TRUE)
+library(tidyverse)
+library(faraway) #halfnorm
+library(TSA) #eacf
+library(forecast) #autoarima
+library(gridExtra) #grid arrange
+```
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+setwd("/Users/Large_Data/Final_Data")
+test <- read.csv(file = '202010.csv')
+head(test)
+glimpse(test)
+```
+Variables of our interest:
+FlightDate 2018-01-02
+IATA_CODE_Reporting_Airline e.g. AA UA
+Flight_Number_Reporting_Airline 588
+Origin JFK
+Dest SFO
+DepDelayMinutes <15 -> =0
+ArrDelayMinutes
+Cancelled 0/1
+Diverted 0/1
+
+Airports: EWR 
+Airplines: AA
+Overall Cancellation Delay 
+Total 120 months
+
+
+```{r}
+library(data.table)
+path = "/Users/Large_Data/Final_Data"
+setwd(path)
+pattern = '*.csv'
+files = list.files(path, pattern, full.names = TRUE)
+ap.numflights.df <- data.frame(ORIGIN=c('EWR','JFK'), n=c(0,0))
+al.numflights.df <- data.frame(IATA_CODE_REPORTING_AIRLINE=c('AA','UA'), n=c(0,0))
+dep.timeblk.numflights.df <- data.frame(DEPTIMEBLK=character(),n=integer())
+arr.timeblk.numflights.df <- data.frame(ARRTIMEBLK=character(),n=integer())
+
+num.total <- NULL
+num.cancel <- NULL
+num.ontime <- NULL #dep delay<=15min
+avg.delay <- NULL
+iter<-1
+
+for (file in files){
+  # read one file at a time from files as df
+  df <- fread(file=file,sep = ",", stringsAsFactors = FALSE, header = TRUE)
+  names(df) <- toupper(names(df))
+  if ('FL_DATE' %in% names(df)){
+    df <- df[,c('OP_UNIQUE_CARRIER', 'ORIGIN', 'DEST', 
+                'DEP_DELAY_NEW', 'DEP_TIME_BLK', 'ARR_DELAY_NEW',
+                'ARR_TIME_BLK', 'CANCELLED', 'DIVERTED', 'DISTANCE')]
+    names(df) <- c('IATA_CODE_REPORTING_AIRLINE', 'ORIGIN', 'DEST',
+                   'DEPDELAYMINUTES', 'DEPTIMEBLK', 'ARRDELAYMINUTES',
+                   'ARRTIMEBLK', 'CANCELLED', 'DIVERTED', 'DISTANCE')
+  }
+  else
+    df <- df[,c('IATA_CODE_REPORTING_AIRLINE', 'ORIGIN', 'DEST', 'DEPDELAYMINUTES', 'DEPTIMEBLK', 'ARRDELAYMINUTES', 'ARRTIMEBLK', 'CANCELLED', 'DIVERTED', 'DISTANCE')]
+  
+  # Overall
+  num.total<-c(num.total, nrow(df))
+  num.cancel<-c(num.cancel, nrow(df[df$CANCELLED==1,]))
+  num.ontime<-c(num.ontime, nrow(df[(df$CANCELLED==0) & 
+              (df$DIVERTED==0) &(df$DEPDELAYMINUTES<=15),]))
+  avg.delay <-c(avg.delay,mean(df[(df$CANCELLED==0) & 
+              (df$DIVERTED==0) & 
+                (df$DEPDELAYMINUTES>15),]$DEPDELAYMINUTES))
+  
+  # find major airports and airlines frequence of time
+  ap.numflights.df<- bind_rows(ap.numflights.df, 
+    count(df,ORIGIN)) %>% 
+    group_by(ORIGIN) %>% 
+    summarise_all(sum)
+  al.numflights.df<- bind_rows(al.numflights.df, 
+    count(df,IATA_CODE_REPORTING_AIRLINE)) %>%
+    group_by(IATA_CODE_REPORTING_AIRLINE) %>% 
+    summarise_all(sum)
+  dep.timeblk.numflights.df<- bind_rows(
+    dep.timeblk.numflights.df, 
+    count(df,DEPTIMEBLK)) %>% 
+    group_by(DEPTIMEBLK) %>% 
+    summarise_all(sum)
+  arr.timeblk.numflights.df<- bind_rows(
+    arr.timeblk.numflights.df, 
+    count(df,ARRTIMEBLK)) %>% 
+    group_by(ARRTIMEBLK) %>% 
+    summarise_all(sum)
+  if (iter%%10==0)
+    print(paste(iter,'/',length(files)))
+  iter<-iter+1
+}
+
+```
+Airport departure delay  airport arrival delay 
+Identify number of scheduled flights departured in an airport monthly 9.75 yrs 3561 days
+```{r}
+ap.numflights<-ap.numflights.df$n/9.75
+al.numflights<-al.numflights.df$n/9.75
+halfnorm(ap.numflights,labs = ap.numflights.df$ORIGIN,ylab='Num of Flights Annually',cex=0.2, nlab = 5,main='Finding Large Airports')
+halfnorm(al.numflights,labs = al.numflights.df$IATA_CODE_REPORTING_AIRLINE,ylab='Num of Flights Annually',cex= 0.2,nlab = 5,main='Finding Large Airlines')
+
+dep.timeblk.numflights.df<-dep.timeblk.numflights.df %>% 
+  rename(TIMEBLK=DEPTIMEBLK) %>%
+  as.data.frame()
+
+arr.timeblk.numflights.df<-arr.timeblk.numflights.df %>% 
+  rename(TIMEBLK=ARRTIMEBLK) %>%
+  as.data.frame()
+```
+
+```{r}
+ggplot()+
+  geom_line(data=dep.timeblk.numflights.df[-1,],aes(x=as.factor(TIMEBLK),y=log10(n),col='DEP',group=1))+
+  geom_line(data=arr.timeblk.numflights.df[-1,],aes(x=as.factor(TIMEBLK),y=log10(n),col='ARR',group=1))+
+  theme(axis.text.x = element_text(angle = 45), plot.title = element_text(hjust = 0.5))+
+  ylab('log10(Num of Flights)')+
+  xlab('Time Blocks')+
+  ggtitle('Daily Variation of Num of Flights')
+```
+
+LAX DEN DFW ORD ATL  Top 20%(76) Airports takes up more than 87% number of flights  top 4.7%(18) takes up 50% of scheduled flights.
+
+```{r}
+low.ap.numflights<-quantile(ap.numflights,0.9)
+top_df<-ap.numflights.df[ap.numflights.df$n>=low.ap.numflights,]
+sum(top_df$n/9.75)/sum(ap.numflights.df$n/9.75)
+
+low.al.numflights<-quantile(al.numflights,0.9)
+al.top_df<-al.numflights.df[al.numflights.df$n>=low.al.numflights,]
+sum(al.top_df$n/9.75)/sum(al.numflights.df$n/9.75)
+```
+Now let's focus on these 20% airports. And calculate monthly cancellation rate, ontime rate, average delay min, average taxi out.
+
+Overall cancel rate
+```{r}
+cancel.list<-num.cancel/num.total
+cancel.series<-ts(cancel.list,start=c(2011,1),frequency=12)
+plot(cancel.series,type='o',main='Cancellation Variation',ylab='Cancellation Rate')
+
+ontime.list<-num.ontime/num.total
+ontime.series<-ts(ontime.list,start=c(2011,1),frequency=12)
+plot(ontime.series,type='o',main='On-Time Rate Variation',ylab='On-Time Rate')
+
+avgdelay.list<-avg.delay
+avgdelay.series<-ts(avgdelay.list,start=c(2011,1),frequency=12)
+plot(avgdelay.series,type='o',main='Average Delay Variation',ylab='Average Delay Minutes')
+```
+What happen in April 2020??  ontime and cancellation is negatively correlated.
+
+```{r}
+before.pandemic.df<-data.frame(time=seq.Date(from = as.Date("2011-01-01"), 
+                                to=as.Date("2020-02-01"), by = "month"),
+           cancel=cancel.list[0:110],
+           ontime=ontime.list[0:110],
+           avgdelay=avgdelay.list[0:110])
+
+cancel.plot<-ggplot(before.pandemic.df)+
+  geom_line(aes(x=time,y=cancel,group=1))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+        plot.title = element_text(hjust = 0.5))+
+  scale_x_date(date_breaks = "3 months",
+               date_labels = "%Y %m") +
+  xlab('')+
+  ggtitle('Cancellation Rate Jan 2011 to Mar 2020')+
+  ylab('Cancellation Rate')
+
+ontime.plot<-ggplot(before.pandemic.df)+
+  geom_line(aes(x=time,y=ontime,group=2))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+        plot.title = element_text(hjust = 0.5))+
+  scale_x_date(date_breaks = "3 months",
+               date_labels = "%Y %m") +
+  ggtitle('On-Time Rate Jan 2011 to Mar 2020')+
+  xlab('Time')+
+  ylab('On-Time Rate')
+
+grid.arrange(cancel.plot, ontime.plot, nrow=2)
+
+ggplot(before.pandemic.df)+
+  geom_line(aes(x=time,y=avgdelay,group=1))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+        plot.title = element_text(hjust = 0.5))+
+  scale_x_date(date_breaks = "3 months",
+               date_labels = "%Y %m") +
+  xlab('Time')+
+  ggtitle('Average Delay Mins Jan 2011 to Mar 2020')+
+  ylab('Average Delay Mins')
+
+```
+```{r}
+cancel.series<-ts(cancel.list[0:110],start=c(2011,1),frequency=12)
+#plot(part.cancel.series,type='o',main='Cancellation Variation Until Dec 2019',ylab='Cancellation Rate')
+ontime.series<-ts(ontime.list[0:110],start=c(2011,1),frequency=12)
+#plot(part.ontime.series,type='o',main='On-Time Variation Until Dec 2019',ylab='On-Time Rate')
+avgdelay.series<-ts(avgdelay.list[0:110],start=c(2011,1),frequency=12)
+#plot(avgdelay.series,type='o',ylab='Average Delay Minutes')
+plot(decompose(cancel.series))
+plot(decompose(ontime.series))
+plot(decompose(avgdelay.series))
+```
+Is it stationary? No! seasonal pattern. kind of Invertible? 
+```{r}
+par(mfrow=c(2,1))
+unfreq.log.cancel.series<-log(ts(cancel.series))
+plot(unfreq.log.cancel.series)
+acf(unfreq.log.cancel.series,lag.max = 50,main='Sample ACF of log Cancellation Rate Series')
+pacf(unfreq.log.cancel.series,lag.max = 50,main='Sample PACF of log Cancellation Rate Series')
+
+plot(diff(unfreq.log.cancel.series,12))
+acf(diff(unfreq.log.cancel.series,12),lag.max = 50,main='Sample ACF of 1st Differencing log Cancellation Rate Series')
+pacf(diff(unfreq.log.cancel.series,12),lag.max = 50,main='Sample PACF of 1st Differencing log Cancellation Rate Series')
+auto.arima(cancel.series)
+```
+CR: ARIMA(2,0,0)(1,0,0)[12], 
+From first differencing plots, we have 
+```{r}
+par(mfrow=c(2,1))
+unfreq.log.ontime.series<-log(ts(ontime.series))
+plot(unfreq.log.ontime.series)
+acf(unfreq.log.ontime.series,lag.max = 50,main='Sample ACF of log On-Time Rate Series')
+pacf(unfreq.log.ontime.series,lag.max = 50,main='Sample PACF of log On-Time Rate Series')
+#Seasonal differencing 
+plot(diff(unfreq.log.ontime.series,12))
+acf(diff(unfreq.log.ontime.series,12),lag.max = 50,main='Sample ACF of 1st Differencing log On-Time Rate Series')
+pacf(diff(unfreq.log.ontime.series,12),lag.max = 50,main='Sample PACF of 1st Differencing log On-Time Rate Series')
+
+plot(diff(diff(unfreq.log.ontime.series,12),12))
+acf(diff(diff(unfreq.log.ontime.series,12),12),lag.max = 50,main='Sample ACF of 2nd Differencing log On-Time Rate Series')
+pacf(diff(diff(unfreq.log.ontime.series,12),12),lag.max = 50, main='Sample PACF of 2nd Differencing log On-Time Rate Series')
+auto.arima(ontime.series)
+```
+
+```{r}
+par(mfrow=c(2,1))
+unfreq.log.avgdelay.series<-log(ts(avgdelay.series))
+plot(unfreq.log.avgdelay.series)
+acf(unfreq.log.avgdelay.series,lag.max = 50,main='Sample ACF of log Average Delay Minutes Series')
+pacf(unfreq.log.avgdelay.series,lag.max = 50,main='Sample PACF of log Average Delay Minutes Series')
+
+plot(diff(unfreq.log.avgdelay.series,12))
+acf(diff(unfreq.log.avgdelay.series,12),lag.max = 50,main='Sample ACF of 1st Differencing log Average Delay Minutes Series')
+pacf(diff(unfreq.log.avgdelay.series,12),lag.max = 50,main='Sample PACF of 1st Differencing log Average Delay Minutes Series')
+
+plot(diff(diff(unfreq.log.avgdelay.series),12))
+acf(diff(diff(unfreq.log.avgdelay.series),12),lag.max = 50,main='Sample ACF of 2nd Differencing log Average Delay Minutes Series')
+pacf(diff(diff(unfreq.log.avgdelay.series),12),lag.max = 50, main='Sample PACF of 2nd Differencing log Average Delay Minutes Series')
+auto.arima(avgdelay.series)
+```
+
+```{r}
+library(tseries)
+adf.test(unfreq.log.cancel.series,k=12)
+adf.test(unfreq.log.ontime.series,k=12)
+adf.test(unfreq.log.avgdelay.series,k=12)
+```
+
+```{r}
+# aic bic
+d<-0
+for (p in 0:3)
+  for (q in 0:4)
+    if(p+q<6){
+      cr.model<-arima(cancel.series, order=c(p,d,q), seasonal = list(order = c(1,0,0), period = 12),method = "ML")
+      print(paste('p=',p,', q=',q,', AIC=',AIC(cr.model),', BIC=',BIC(cr.model)))
+    }
+```
+
+Residual analysis
+```{r}
+cancel.model <- arima(cancel.series, order=c(2,0,0),seasonal = list(order = c(1,0,0), period = 12), method="ML")
+cancel.residual <- residuals(cancel.model)
+plot(cancel.residual, main=expression("Residuals of CR model ARIMA(2,0,0)(1,0,0)[12]"), ylab='Residuals')
+abline(h=0)
+
+ontime.model <- arima(ontime.series, order=c(1,0,0),seasonal = list(order = c(2,1,0), period = 12), method="ML")
+ontime.residual <- residuals(ontime.model)
+plot(ontime.residual, main=expression("Residuals of OTR model ARIMA(1,0,0)(2,1,0)[12]"), ylab='Residuals')
+abline(h=0)
+
+avgdelay.model <- arima(avgdelay.series, order=c(0,1,2), seasonal = list(order = c(0,0,2), period = 12), method="ML")
+avgdelay.residual <- residuals(avgdelay.model)
+plot(avgdelay.residual, main=expression("Residuals of ADM model ARIMA(0,1,2)(0,0,2)[12]"), ylab='Residuals')
+abline(h=0)
+
+LB.test(cancel.model)
+LB.test(ontime.model)
+LB.test(avgdelay.model)
+qqnorm(cancel.residual)
+qqline(cancel.residual)
+shapiro.test(cancel.residual)
+shapiro.test(ontime.residual)
+shapiro.test(avgdelay.residual)
+```
+Predict
+
+```{r}
+predict(cancel.model, n.ahead=10)
+plot(forecast(auto.arima(cancel.series)), main = expression("Forecast ARIMA(2,0,0)(1,0,0)[12]"))
+lines(ts(cancel.list[110:120],start=c(2020,2),frequency=12),col='red')
+plot(forecast(auto.arima(ontime.series)), main = expression("Forecast ARIMA(1,0,0)(2,1,0)[12]"))
+lines(ts(ontime.list[110:120],start=c(2020,2),frequency=12),col='red')
+plot(forecast(auto.arima(avgdelay.series)), main = expression("Forecast ARIMA(0,1,2)(0,0,2)[12]"))
+lines(ts(avgdelay.list[110:120],start=c(2020,2),frequency=12),col='red')
+```
+pandemic series
+```{r}
+pand.cancel.series<-ts(cancel.list[110:120],start=c(2020,03),frequency=12)
+plot(pand.cancel.series)
+pand.ontime.series<-ts(ontime.list[110:120],start=c(2020,03),frequency=12)
+plot(pand.ontime.series)
+pand.avgdelay.series<-ts(avgdelay.list[91:115],start=c(2018,07),frequency=12)
+plot(pand.avgdelay.series)
+auto.arima(pand.avgdelay.series)
+```
+
+```{r}
+new.cancel.list<-cancel.list
+new.cancel.list[111]<-mean(new.cancel.list[0:110])
+new.cancel.list[112]<-mean(new.cancel.list[0:110])
+new.cancel.series<-ts(new.cancel.list[0:115],start=c(2011,01),frequency=12)
+
+new.ontime.list<-ontime.list
+new.ontime.list[111]<-mean(new.ontime.list[0:110])
+new.ontime.list[112]<-mean(new.ontime.list[0:110])
+new.ontime.series<-ts(new.ontime.list[0:115],start=c(2011,01),frequency=12)
+
+```
+
+```{r}
+plot(forecast(auto.arima(new.cancel.series),h=5), main = expression("Forecast ARIMA(2,0,0)(1,0,0)[12]"))
+lines(ts(new.cancel.list[110:120],start=c(2020,2),frequency=12),col='red')
+```
+```{r}
+plot(forecast(auto.arima(new.ontime.series),h=5), main = expression("Forecast ARIMA(1,0,0)(2,1,0)[12]"))
+lines(ts(new.ontime.list[110:120],start=c(2020,2),frequency=12),col='red')
+```
+```{r}
+avgdelay.series.extended<-ts(avgdelay.list[0:115],start=c(2011,1),frequency=12)
+plot(forecast(auto.arima(pand.avgdelay.series),h=5), main = expression("Forecast ARIMA(1,1,0)(0,1,0)[12]"))
+lines(ts(avgdelay.list[110:120],start=c(2020,2),frequency=12),col='red')
+```
+
+Nonstationary
+Cancellation rate: We can find p is between 0-3 and q is between 0-4.
+Decide by AIC and BIC find both minimal
+
+Average delay minutes has an upwarding trend. non stationary
+residual
+flights are independent ADF unit root of AIC BIC
